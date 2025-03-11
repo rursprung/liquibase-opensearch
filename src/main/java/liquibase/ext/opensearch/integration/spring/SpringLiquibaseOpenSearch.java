@@ -6,23 +6,22 @@ import liquibase.command.CommandScope;
 import liquibase.command.core.UpdateCommandStep;
 import liquibase.command.core.helpers.DbUrlConnectionArgumentsCommandStep;
 import liquibase.command.core.helpers.ShowSummaryArgument;
+import liquibase.database.ConnectionServiceFactory;
 import liquibase.database.DatabaseFactory;
 import liquibase.ext.opensearch.database.OpenSearchConnection;
 import liquibase.ext.opensearch.database.OpenSearchLiquibaseDatabase;
-import liquibase.integration.spring.SpringResourceAccessor;
 import liquibase.ui.UIServiceEnum;
 import lombok.Getter;
+import org.opensearch.client.opensearch.OpenSearchClient;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.ResourceLoader;
+import org.springframework.stereotype.Component;
 
-import static liquibase.ext.opensearch.database.OpenSearchLiquibaseDatabase.OPENSEARCH_PREFIX;
-import static liquibase.ext.opensearch.database.OpenSearchLiquibaseDatabase.OPENSEARCH_URI_SEPARATOR;
-
+@Component
 public class SpringLiquibaseOpenSearch implements InitializingBean {
 
     @Autowired
-    private ResourceLoader resourceLoader;
+    private OpenSearchClient openSearchClient;
 
     @Autowired
     private SpringLiquibaseOpenSearchProperties properties;
@@ -32,19 +31,26 @@ public class SpringLiquibaseOpenSearch implements InitializingBean {
 
     @Override
     public void afterPropertiesSet() throws Exception {
-        // liquibase requires the prefix to identify this as an OpenSearch database.
-        final var url = OPENSEARCH_PREFIX + String.join(OPENSEARCH_URI_SEPARATOR, properties.uris());
+        if (!properties.enabled()) {
+            return;
+        }
 
         Scope.child(Scope.Attr.ui.name(), this.uiService.getUiServiceClass().getDeclaredConstructor().newInstance(),
                 () -> {
-                    final var database = (OpenSearchLiquibaseDatabase) DatabaseFactory.getInstance().openDatabase(url, properties.username(), properties.password(), null, new SpringResourceAccessor(this.resourceLoader));
-                    final var connection = (OpenSearchConnection) database.getConnection();
+                    // we want to re-use the connection which spring-data-opensearch (or somebody else) already constructed
+                    // => do not rely on liquibase' standard mechanism of constructing a new connection, instead we force it to take our own.
+                    final var connection = new OpenSearchConnection(openSearchClient);
+                    ConnectionServiceFactory.getInstance().register(connection);
+                    final var database = new OpenSearchLiquibaseDatabase();
+                    database.setConnection(connection);
+                    DatabaseFactory.getInstance().register(database);
+
                     new CommandScope(UpdateCommandStep.COMMAND_NAME)
                             .addArgumentValue(ShowSummaryArgument.SHOW_SUMMARY_OUTPUT, UpdateSummaryOutputEnum.LOG)
                             .addArgumentValue(DbUrlConnectionArgumentsCommandStep.DATABASE_ARG, database)
-                            .addArgumentValue(UpdateCommandStep.CHANGELOG_FILE_ARG, properties.liquibase().changelogFile())
-                            .addArgumentValue(UpdateCommandStep.CONTEXTS_ARG, properties.liquibase().contexts())
-                            .addArgumentValue(UpdateCommandStep.LABEL_FILTER_ARG, properties.liquibase().labelFilterArgs())
+                            .addArgumentValue(UpdateCommandStep.CHANGELOG_FILE_ARG, properties.changelogFile())
+                            .addArgumentValue(UpdateCommandStep.CONTEXTS_ARG, properties.contexts())
+                            .addArgumentValue(UpdateCommandStep.LABEL_FILTER_ARG, properties.labelFilterArgs())
                             .execute();
                     connection.close();
                     database.close();
